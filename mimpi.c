@@ -5,11 +5,31 @@
 #include "channel.h"
 #include "mimpi.h"
 #include "mimpi_common.h"
+#include <stdlib.h>
+#include <unistd.h>
 
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
 
-    TODO
+    int rank = MIMPI_World_rank();
+
+    // Create channel for helper process.
+    int channel_dsc_aux[2];
+    ASSERT_SYS_OK(channel(channel_dsc_aux));
+
+    pid_t pid = fork();
+    ASSERT_SYS_OK(pid);
+    if (!pid) {
+
+    } else {
+        // Close aux write descriptor.
+        ASSERT_SYS_OK(close(channel_dsc_aux[1]));
+
+        // Close main read descriptor.
+        ASSERT_SYS_OK(close(rank + MIMPI_MAIN_READ_OFFSET));
+
+        // Close semaphore write.
+    }
 }
 
 void MIMPI_Finalize() {
@@ -19,11 +39,11 @@ void MIMPI_Finalize() {
 }
 
 int MIMPI_World_size() {
-    TODO
+    return atoi(getenv("MIMPI_size"));
 }
 
 int MIMPI_World_rank() {
-    TODO
+    return atoi(getenv("MIMPI_rank"));
 }
 
 MIMPI_Retcode MIMPI_Send(

@@ -1,4 +1,4 @@
-.PHONY: all clean
+.PHONY: all my_test  clean
 
 EXAMPLES := $(addprefix examples_build/,$(notdir $(basename $(wildcard examples/*.c))))
 FILES_ALLOWED_FOR_CHANGE := $(shell cat files_allowed_for_change)
@@ -13,6 +13,9 @@ MIMPIRUN_SRC := $(MIMPI_COMMON_SRC) mimpirun.c
 MIMPI_SRC := $(MIMPI_COMMON_SRC) mimpi.c mimpi.h
 
 all: mimpirun $(EXAMPLES) $(TESTS)
+
+my_test: my_test.c $(MIMPI_SRC)
+	gcc $(CFLAGS) -o $@ $(filter %.c,$^)
 
 mimpirun: $(MIMPIRUN_SRC)
 	gcc $(CFLAGS) -o $@ $(filter %.c,$^)
