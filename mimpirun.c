@@ -12,20 +12,32 @@
 #define READ 0
 #define WRITE 1
 
-#define OPEN_A_CHANNEL(i, type, read_offset, write_offset)    \
-    ASSERT_SYS_OK(channel(channel_dsc_##type[i]));            \
-    if (channel_dsc_##type[i][WRITE] == i + read_offset) {    \
-        int new_dsc = dup(channel_dsc_##type[i][READ]);       \
-        ASSERT_SYS_OK(new_dsc);                               \
-        ASSERT_SYS_OK(close(channel_dsc_##type[i][WRITE]));   \
-        channel_dsc_##type[i][WRITE] = new_dsc;               \
-    }                                                         \
-    ASSERT_SYS_OK(dup2(channel_dsc_##type[i][READ],           \
-        i + read_offset));                                    \
-    ASSERT_SYS_OK(close(channel_dsc_##type[i][READ]));        \
-    ASSERT_SYS_OK(dup2(channel_dsc_##type[i][WRITE],          \
-        i + write_offset));                                   \
-    ASSERT_SYS_OK(close(channel_dsc_##type[i][WRITE]));
+ void open_channels(int read_offset, int write_offset, int n) {
+     int channel_dsc[2];
+     int new_dsc;
+
+     for (int i = 0; i < n; i++) {
+         ASSERT_SYS_OK(channel(channel_dsc));
+
+         // Check if current write descriptor and future read descriptor collide.
+         if (channel_dsc[WRITE] == i + read_offset) {
+            new_dsc = dup(channel_dsc[WRITE]);
+            ASSERT_SYS_OK(new_dsc);
+            ASSERT_SYS_OK(close(channel_dsc[WRITE]));
+            channel_dsc[WRITE] = new_dsc;
+         }
+
+         if (channel_dsc[READ] != i + read_offset) {
+             ASSERT_SYS_OK(dup2(channel_dsc[READ], i + read_offset));
+             ASSERT_SYS_OK(close(channel_dsc[READ]));
+         }
+
+         if (channel_dsc[WRITE] != i + write_offset) {
+             ASSERT_SYS_OK(dup2(channel_dsc[WRITE], i + write_offset));
+             ASSERT_SYS_OK(close(channel_dsc[WRITE]));
+         }
+     }
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -40,20 +52,12 @@ int main(int argc, char** argv) {
     char** args = &argv[2];
     args[0] = prog;
 
-    int channel_dsc_main[n][2];
-    for (int i = 0; i < n; i++) {
-        OPEN_A_CHANNEL(i, main, MIMPI_MAIN_READ_OFFSET, MIMPI_MAIN_WRITE_OFFSET)
-    }
-
-    int channel_dsc_sem[n][2];
-    for (int i = 0; i < n; i++) {
-        OPEN_A_CHANNEL(i, sem, MIMPI_SEM_READ_OFFSET, MIMPI_SEM_WRITE_OFFSET)
-    }
-
-    int channel_dsc_queue[n][2];
-    for (int i = 0; i < n; i++) {
-        OPEN_A_CHANNEL(i, queue, MIMPI_QUEUE_READ_OFFSET, MIMPI_QUEUE_WRITE_OFFSET)
-    }
+    open_channels(MIMPI_MAIN_READ_OFFSET,
+                  MIMPI_MAIN_WRITE_OFFSET, n);
+    open_channels(MIMPI_SEM_READ_OFFSET,
+                  MIMPI_SEM_WRITE_OFFSET, n);
+    open_channels(MIMPI_QUEUE_READ_OFFSET,
+                  MIMPI_QUEUE_WRITE_OFFSET, n);
 
     for (int i = 0; i < n; i++) {
         pid_t pid = fork();
