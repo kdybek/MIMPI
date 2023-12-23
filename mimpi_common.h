@@ -48,12 +48,15 @@ _Noreturn extern void fatal(const char* fmt, ...);
 /////////////////////////////////////////////
 // Put your declarations here
 
+// Offsets:
 #define MIMPI_MAIN_READ_OFFSET 20
 #define MIMPI_MAIN_WRITE_OFFSET 36
-#define MIMPI_AUX_READ_OFFSET 52
-#define MIMPI_AUX_WRITE_OFFSET 68
-#define MIMPI_SEM_READ_OFFSET 84
-#define MIMPI_SEM_WRITE_OFFSET 100
+#define MIMPI_SEM_READ_OFFSET 52
+#define MIMPI_SEM_WRITE_OFFSET 68
+#define MIMPI_QUEUE_READ_OFFSET 84
+#define MIMPI_QUEUE_WRITE_OFFSET 100
 
+// Signals:
+#define MIMPI_END 0
 
 #endif // MIMPI_COMMON_H
