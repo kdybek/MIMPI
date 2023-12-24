@@ -25,14 +25,15 @@ typedef struct buffer_node
     int count;
     void* data;
     struct buffer_node* next;
+    struct buffer_node* prev;
 
 } buffer_node_t;
 
 /* Global Data */
 static pthread_mutex_t g_mutex;
 static pthread_mutex_t g_main_prog;
-static buffer_node_t* g_first_node; // First node will always be the dummy.
-static volatile buffer_node_t* g_last_node;
+static buffer_node_t* g_first_node;
+static buffer_node_t* g_last_node;
 static volatile bool g_alive[MIMPI_MAX_NUMBER_OF_PROCESSES];
 static volatile bool g_main_waiting;
 static volatile int g_tag;
@@ -51,6 +52,7 @@ static buffer_node_t* new_node(int tag, int sender, int count, void* data) {
     new_n->count = count;
     new_n->data = data;
     new_n->next = NULL;
+    new_n->prev = NULL;
     return new_n;
 }
 
@@ -68,6 +70,13 @@ static void cleanup() {
     }
 }
 
+// Never to be performed on g_first_node or g_last_node!!!
+static void del_node(buffer_node_t* node) {
+    node->prev->next = node->next;
+    node->next->prev = node->prev;
+    free(node);
+}
+
 // Never to be performed outside a mutex!!!
 static bool find_and_delete(
         void* data,
@@ -77,19 +86,15 @@ static bool find_and_delete(
 ) {
     buffer_node_t* itr = g_first_node;
     itr = itr->next;
-    buffer_node_t* prev = g_first_node;
-    while (itr != NULL) {
+    while (itr != g_last_node) {
         if (tag_compare(tag, itr->tag) &&
         count == itr->count &&
         source == itr->sender) {
             data = itr->data;
-            prev->next = itr->next;
-            if (prev->next == NULL) g_last_node = prev;
-            free(itr);
+            del_node(itr);
             return true;
         }
         itr = itr->next;
-        prev = prev->next;
     }
     return false;
 }
@@ -140,8 +145,11 @@ static void* Helper_main() {
                 buffer_node_t* node = new_node(signal.tag, signal.sender, signal.count, buff);
 
                 ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
-                g_last_node->next = node;
-                g_last_node = node;
+                g_last_node->prev->next = node;
+                node->prev = g_last_node->prev;
+                g_last_node->prev = node;
+                node->next = g_last_node;
+
                 if (g_main_waiting &&
                     tag_compare(g_tag, signal.tag) &&
                     g_sender == signal.sender &&
@@ -166,7 +174,9 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     ASSERT_ZERO(pthread_mutex_init(&g_main_prog, NULL));
     g_main_waiting = false;
     g_first_node = new_node(0, -1, 0, NULL);
-    g_last_node = g_first_node;
+    g_last_node = new_node(0, -1, 0, NULL);
+    g_first_node->next = g_last_node;
+    g_last_node->prev = g_first_node;
     for (int i = 0; i < MIMPI_World_size(); i++) {
         g_alive[i] = true;
     }
@@ -247,13 +257,23 @@ MIMPI_Retcode MIMPI_Recv(
         // Critical section inheritance
 
         g_main_waiting = false;
-        if (tag_compare(tag, g_last_node->tag) &&
-        source == g_last_node->sender &&
-        count == g_last_node->count) {
-            data = g_last_node->data;
-        }
-    }
+        buffer_node_t* candidate = g_last_node->prev;
 
+        if (tag_compare(tag, candidate->tag) &&
+        source == candidate->sender &&
+        count == candidate->count) {
+            data = candidate->data;
+            del_node(candidate);
+            ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+            return MIMPI_SUCCESS;
+        } else { // main was woken up, because source left the MIMPI block.
+            ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
+    } else {
+        ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+        return MIMPI_SUCCESS;
+    }
 }
 
 MIMPI_Retcode MIMPI_Barrier() {
