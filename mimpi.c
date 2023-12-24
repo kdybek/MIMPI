@@ -7,6 +7,7 @@
 #include "mimpi_common.h"
 #include <stdlib.h>
 #include <pthread.h>
+#include <string.h>
 
 /* Structs */
 typedef struct signal
@@ -74,7 +75,32 @@ static void cleanup() {
 static void del_node(buffer_node_t* node) {
     node->prev->next = node->next;
     node->next->prev = node->prev;
+    free(node->data);
     free(node);
+}
+
+static inline int left_child(int rank) { return rank * 2 + 1; }
+
+static inline int right_child(int rank) { return left_child(rank) + 1; }
+
+static inline bool has_left_child(int rank) {
+    int size = MIMPI_World_size();
+
+    return left_child(rank) >= size;
+}
+
+static inline bool has_right_child(int rank) {
+    int size = MIMPI_World_size();
+
+    return right_child(rank) >= size;
+}
+
+static inline int parent(int rank) {
+    return (rank - 1) / 2;
+}
+
+static inline bool is_root(int rank) {
+    return rank == 0;
 }
 
 // Never to be performed outside a mutex!!!
@@ -90,7 +116,7 @@ static bool find_and_delete(
         if (tag_compare(tag, itr->tag) &&
         count == itr->count &&
         source == itr->sender) {
-            data = itr->data;
+            memcpy(data, itr->data, count);
             del_node(itr);
             return true;
         }
@@ -103,7 +129,7 @@ static void* Helper_main() {
     signal_t signal;
     int rank = MIMPI_World_rank();
     bool end = false;
-    char* dummy = NULL;
+    char* dummy = malloc(sizeof(char));
 
     while (!end) {
         chrecv(rank + MIMPI_QUEUE_READ_OFFSET,
@@ -162,6 +188,7 @@ static void* Helper_main() {
         }
     }
 
+    free(dummy);
     cleanup();
     channels_finalize();
     return NULL;
@@ -172,6 +199,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
 
     ASSERT_ZERO(pthread_mutex_init(&g_mutex, NULL));
     ASSERT_ZERO(pthread_mutex_init(&g_main_prog, NULL));
+    ASSERT_SYS_OK(pthread_mutex_lock(&g_main_prog)); // I want this mutex initialized with 0.
     g_main_waiting = false;
     g_first_node = new_node(0, -1, 0, NULL);
     g_last_node = new_node(0, -1, 0, NULL);
@@ -262,7 +290,7 @@ MIMPI_Retcode MIMPI_Recv(
         if (tag_compare(tag, candidate->tag) &&
         source == candidate->sender &&
         count == candidate->count) {
-            data = candidate->data;
+            memcpy(data, candidate->data, count);
             del_node(candidate);
             ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
             return MIMPI_SUCCESS;
@@ -277,7 +305,32 @@ MIMPI_Retcode MIMPI_Recv(
 }
 
 MIMPI_Retcode MIMPI_Barrier() {
-    TODO
+    int rank = MIMPI_World_rank();
+    char* dummy = malloc(sizeof(char));
+
+    if (has_left_child(rank)) {
+        chrecv(rank + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+    }
+
+    if (has_right_child(rank)) {
+        chrecv(rank + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+    }
+
+    if (!is_root(rank)) {
+        chsend(parent(rank) + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
+        chrecv(rank + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+    }
+
+    if (has_left_child(rank)) {
+        chsend(left_child(rank) + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
+    }
+
+    if (has_right_child(rank)) {
+        chsend(right_child(rank) + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
+    }
+
+    free(dummy);
+    return MIMPI_SUCCESS;
 }
 
 MIMPI_Retcode MIMPI_Bcast(

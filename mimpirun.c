@@ -58,6 +58,8 @@ int main(int argc, char** argv) {
                   MIMPI_SEM_WRITE_OFFSET, n);
     open_channels(MIMPI_QUEUE_READ_OFFSET,
                   MIMPI_QUEUE_WRITE_OFFSET, n);
+    open_channels(MIMPI_GROUP_READ_OFFSET,
+                  MIMPI_GROUP_WRITE_OFFSET, n);
 
     for (int i = 0; i < n; i++) {
         pid_t pid = fork();
@@ -69,6 +71,9 @@ int main(int argc, char** argv) {
             // Close the semaphore write descriptors.
             ASSERT_SYS_OK(close(i + MIMPI_SEM_WRITE_OFFSET));
 
+            // Close the group write descriptor.
+            ASSERT_SYS_OK(close(i + MIMPI_GROUP_WRITE_OFFSET));
+
             for (int j = 0; j < n; j++) {
                 if (j != i) {
                     // Close the main read descriptors.
@@ -79,6 +84,9 @@ int main(int argc, char** argv) {
 
                     // Close the queue read descriptors.
                     ASSERT_SYS_OK(close(j + MIMPI_QUEUE_READ_OFFSET));
+
+                    // Close the read write descriptor.
+                    ASSERT_SYS_OK(close(i + MIMPI_GROUP_READ_OFFSET));
                 }
             }
 
@@ -109,6 +117,8 @@ int main(int argc, char** argv) {
         ASSERT_SYS_OK(close(i + MIMPI_SEM_WRITE_OFFSET));
         ASSERT_SYS_OK(close(i + MIMPI_QUEUE_READ_OFFSET));
         ASSERT_SYS_OK(close(i + MIMPI_QUEUE_WRITE_OFFSET));
+        ASSERT_SYS_OK(close(i + MIMPI_GROUP_READ_OFFSET));
+        ASSERT_SYS_OK(close(i + MIMPI_GROUP_WRITE_OFFSET));
     }
 
     for (int i = 0; i < n; i++) {
