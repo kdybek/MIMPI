@@ -61,6 +61,6 @@ _Noreturn extern void fatal(const char* fmt, ...);
 #define MIMPI_SEND 1
 
 // Misc:
-#define MAX_NUMBER_OF_PROCESSES 16
+#define MIMPI_MAX_NUMBER_OF_PROCESSES 16
 
 #endif // MIMPI_COMMON_H

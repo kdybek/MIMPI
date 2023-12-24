@@ -55,11 +55,11 @@ static int msleep(long msec)
 #define READ_VAR "MIMPI_READ_DELAY"
 #define ATOMIC_BLOCK_SIZE 512
 
-pthread_mutex_t mutex;
+pthread_mutex_t g_mutex;
 
 static void delay(const char *delay_var, const size_t size)
 {
-    ASSERT_ZERO(pthread_mutex_lock(&mutex));
+    ASSERT_ZERO(pthread_mutex_lock(&g_mutex));
 
     const char *delay_str = getenv(delay_var);
     if (delay_str)
@@ -71,7 +71,7 @@ static void delay(const char *delay_var, const size_t size)
         }
     }
     // Defaults to not wait
-    ASSERT_ZERO(pthread_mutex_unlock(&mutex));
+    ASSERT_ZERO(pthread_mutex_unlock(&g_mutex));
 }
 
 int channel(int pipefd[2])
@@ -84,12 +84,12 @@ void channels_init() {
 
     pthread_mutexattr_t attr;
     ASSERT_ZERO(pthread_mutexattr_init(&attr));
-    ASSERT_ZERO(pthread_mutex_init(&mutex, &attr));
+    ASSERT_ZERO(pthread_mutex_init(&g_mutex, &attr));
     ASSERT_ZERO(pthread_mutexattr_destroy(&attr));
 }
 
 void channels_finalize() {
-    ASSERT_ZERO(pthread_mutex_destroy(&mutex));
+    ASSERT_ZERO(pthread_mutex_destroy(&g_mutex));
 }
 
 int chsend(int __fd, const void *__buf, size_t __n)

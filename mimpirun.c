@@ -64,7 +64,6 @@ int main(int argc, char** argv) {
         ASSERT_SYS_OK(pid);
         if (!pid) {
             // Close the main write descriptor.
-            // Can a process send a message to himself though?
             ASSERT_SYS_OK(close(i + MIMPI_MAIN_WRITE_OFFSET));
 
             // Close the semaphore write descriptors.
