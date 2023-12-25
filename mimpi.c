@@ -120,6 +120,12 @@ static inline bool is_right_child(int rank) {
     return !is_left_child(rank);
 }
 
+static int rank_adjust(int og_rank, int root) {
+    if (og_rank == root) return 0;
+    else if (og_rank == 0) return root;
+    else return og_rank;
+}
+
 // Never to be performed outside a mutex!!!
 static bool find_and_delete(
         void* data,
@@ -324,16 +330,21 @@ MIMPI_Retcode MIMPI_Recv(
 MIMPI_Retcode MIMPI_Barrier() {
     int ret;
     int rank = MIMPI_World_rank();
+    int l = left_child(rank);
+    int r = right_child(rank);
+    // If rank is the root of the tree, there will be garbage in p, but it won't be used.
+    int p = parent(rank);
     char* dummy = malloc(sizeof(char));
 
     if (has_left_child(rank)) {
-        ret = chrecv(left_child(rank) + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
+        // Parent reads from group r channel.
+        ret = chrecv(l + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
         ASSERT_SYS_OK(ret);
         CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
 
     if (has_right_child(rank)) {
-        ret = chrecv(left_child(rank) + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
+        ret = chrecv(r + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
         ASSERT_SYS_OK(ret);
         CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
@@ -345,7 +356,7 @@ MIMPI_Retcode MIMPI_Barrier() {
         if (is_left_child(rank)) offset = MIMPI_GROUP_L_READ_OFFSET;
         else offset = MIMPI_GROUP_R_READ_OFFSET;
 
-        ret = chrecv(parent(rank) + offset, dummy, sizeof(char));
+        ret = chrecv(p + offset, dummy, sizeof(char));
         ASSERT_SYS_OK(ret);
         CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
@@ -367,7 +378,48 @@ MIMPI_Retcode MIMPI_Bcast(
         int count,
         int root
 ) {
-    TODO
+    int ret;
+    int rank = rank_adjust(MIMPI_World_rank(), root);
+    int l = rank_adjust(left_child(rank), root);
+    int r = rank_adjust(right_child(rank), root);
+    // If rank is the root of the tree, there will be garbage in p, but it won't be used.
+    int p = rank_adjust(parent(rank), root);
+    char* dummy = malloc(sizeof(char));
+
+    if (has_left_child(rank)) {
+        ret = chrecv(l + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
+        ASSERT_SYS_OK(ret);
+        CHECK_IF_REMOTE_FINISHED(rank, ret);
+    }
+
+    if (has_right_child(rank)) {
+        ret = chrecv(r + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
+        ASSERT_SYS_OK(ret);
+        CHECK_IF_REMOTE_FINISHED(rank, ret);
+    }
+
+    if (!is_root(rank)) {
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, dummy, sizeof(char)));
+
+        int offset;
+        if (is_left_child(rank)) offset = MIMPI_GROUP_L_READ_OFFSET;
+        else offset = MIMPI_GROUP_R_READ_OFFSET;
+
+        ret = chrecv(p + offset, data, count);
+        ASSERT_SYS_OK(ret);
+        CHECK_IF_REMOTE_FINISHED(rank, ret);
+    }
+
+    if (has_left_child(rank)) {
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_L_WRITE_OFFSET, data, count));
+    }
+
+    if (has_right_child(rank)) {
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, data, count));
+    }
+
+    free(dummy);
+    return MIMPI_SUCCESS;
 }
 
 MIMPI_Retcode MIMPI_Reduce(
