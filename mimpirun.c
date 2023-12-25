@@ -71,8 +71,8 @@ int main(int argc, char** argv) {
             // Close the semaphore write descriptors.
             ASSERT_SYS_OK(close(i + MIMPI_SEM_WRITE_OFFSET));
 
-            // Close the group write descriptor.
-            ASSERT_SYS_OK(close(i + MIMPI_GROUP_WRITE_OFFSET));
+            // Close the group read descriptor.
+            ASSERT_SYS_OK(close(i + MIMPI_GROUP_READ_OFFSET));
 
             for (int j = 0; j < n; j++) {
                 if (j != i) {
@@ -85,8 +85,8 @@ int main(int argc, char** argv) {
                     // Close the queue read descriptors.
                     ASSERT_SYS_OK(close(j + MIMPI_QUEUE_READ_OFFSET));
 
-                    // Close the read write descriptor.
-                    ASSERT_SYS_OK(close(i + MIMPI_GROUP_READ_OFFSET));
+                    // Close the group write descriptor.
+                    ASSERT_SYS_OK(close(j + MIMPI_GROUP_WRITE_OFFSET));
                 }
             }
 

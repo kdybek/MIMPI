@@ -48,6 +48,14 @@ _Noreturn extern void fatal(const char* fmt, ...);
 /////////////////////////////////////////////
 // Put your declarations here
 
+#define CHECK_IF_REMOTE_FINISHED(rank, ret)                                                \
+    do {                                                                                   \
+        if (ret == 0) {                                                                    \
+            ASSERT_SYS_OK(close(rank + MIMPI_GROUP_WRITE_OFFSET));                         \
+            return MIMPI_ERROR_REMOTE_FINISHED;                                            \
+        }                                                                                  \
+    } while(0)
+
 // Offsets:
 #define MIMPI_MAIN_READ_OFFSET 20
 #define MIMPI_MAIN_WRITE_OFFSET 36

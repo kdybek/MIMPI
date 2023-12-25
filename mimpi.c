@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Structs */
 typedef struct signal
@@ -29,6 +30,14 @@ typedef struct buffer_node
     struct buffer_node* prev;
 
 } buffer_node_t;
+
+typedef struct send_info
+{
+    void* data;
+    int n_bytes;
+    int destination;
+
+} send_info_t;
 
 /* Global Data */
 static pthread_mutex_t g_mutex;
@@ -125,7 +134,7 @@ static bool find_and_delete(
     return false;
 }
 
-static void* Helper_main() {
+static void* helper_main() {
     signal_t signal;
     int rank = MIMPI_World_rank();
     bool end = false;
@@ -215,7 +224,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     ASSERT_ZERO(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
 
     pthread_t thread;
-    ASSERT_ZERO(pthread_create(&thread, &attr, Helper_main, NULL));
+    ASSERT_ZERO(pthread_create(&thread, &attr, helper_main, NULL));
 
     ASSERT_ZERO(pthread_attr_destroy(&attr));
 }
@@ -274,7 +283,7 @@ MIMPI_Retcode MIMPI_Recv(
     if (!find_and_delete(data, count, source, tag)) {
         if (!g_alive[source]) return MIMPI_ERROR_REMOTE_FINISHED;
 
-        // Give the helper info about what it's looking for.
+        // Give the helper info about what to look for.
         g_main_waiting = true;
         g_sender = source;
         g_tag = tag;
@@ -305,28 +314,33 @@ MIMPI_Retcode MIMPI_Recv(
 }
 
 MIMPI_Retcode MIMPI_Barrier() {
+    int ret;
     int rank = MIMPI_World_rank();
-    char* dummy = malloc(sizeof(char));
+    char* dummy = malloc(2 * sizeof(char));
 
     if (has_left_child(rank)) {
-        chrecv(rank + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ret = chrecv(left_child(rank) + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ASSERT_SYS_OK(ret);
+        CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
 
     if (has_right_child(rank)) {
-        chrecv(rank + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ret = chrecv(left_child(rank) + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ASSERT_SYS_OK(ret);
+        CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
 
     if (!is_root(rank)) {
-        chsend(parent(rank) + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
-        chrecv(rank + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        chsend(rank + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
+        ret = chrecv(parent(rank) + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ASSERT_SYS_OK(ret);
+        CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
 
-    if (has_left_child(rank)) {
-        chsend(left_child(rank) + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
-    }
-
-    if (has_right_child(rank)) {
-        chsend(right_child(rank) + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
+    if (has_left_child(rank) && has_right_child(rank)) {
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_WRITE_OFFSET, dummy, 2 * sizeof(char)));
+    } else if (has_left_child(rank) || has_right_child(rank)) {
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char)));
     }
 
     free(dummy);

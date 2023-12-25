@@ -12,7 +12,7 @@ MIMPI_COMMON_SRC := $(CHANNEL_SRC) mimpi_common.c mimpi_common.h
 MIMPIRUN_SRC := $(MIMPI_COMMON_SRC) mimpirun.c
 MIMPI_SRC := $(MIMPI_COMMON_SRC) mimpi.c mimpi.h
 
-all: mimpirun $(EXAMPLES) $(TESTS)
+all: mimpirun my_test $(EXAMPLES) $(TESTS)
 
 my_test: my_test.c $(MIMPI_SRC)
 	gcc $(CFLAGS) -o $@ $(filter %.c,$^)
