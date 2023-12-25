@@ -112,6 +112,14 @@ static inline bool is_root(int rank) {
     return rank == 0;
 }
 
+static inline bool is_left_child(int rank) {
+    return rank % 2 == 1;
+}
+
+static inline bool is_right_child(int rank) {
+    return !is_left_child(rank);
+}
+
 // Never to be performed outside a mutex!!!
 static bool find_and_delete(
         void* data,
@@ -316,31 +324,38 @@ MIMPI_Retcode MIMPI_Recv(
 MIMPI_Retcode MIMPI_Barrier() {
     int ret;
     int rank = MIMPI_World_rank();
-    char* dummy = malloc(2 * sizeof(char));
+    char* dummy = malloc(sizeof(char));
 
     if (has_left_child(rank)) {
-        ret = chrecv(left_child(rank) + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ret = chrecv(left_child(rank) + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
         ASSERT_SYS_OK(ret);
         CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
 
     if (has_right_child(rank)) {
-        ret = chrecv(left_child(rank) + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ret = chrecv(left_child(rank) + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
         ASSERT_SYS_OK(ret);
         CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
 
     if (!is_root(rank)) {
-        chsend(rank + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char));
-        ret = chrecv(parent(rank) + MIMPI_GROUP_READ_OFFSET, dummy, sizeof(char));
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, dummy, sizeof(char)));
+
+        int offset;
+        if (is_left_child(rank)) offset = MIMPI_GROUP_L_READ_OFFSET;
+        else offset = MIMPI_GROUP_R_READ_OFFSET;
+
+        ret = chrecv(parent(rank) + offset, dummy, sizeof(char));
         ASSERT_SYS_OK(ret);
         CHECK_IF_REMOTE_FINISHED(rank, ret);
     }
 
-    if (has_left_child(rank) && has_right_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_WRITE_OFFSET, dummy, 2 * sizeof(char)));
-    } else if (has_left_child(rank) || has_right_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_WRITE_OFFSET, dummy, sizeof(char)));
+    if (has_left_child(rank)) {
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_L_WRITE_OFFSET, dummy, sizeof(char)));
+    }
+
+    if (has_right_child(rank)) {
+        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, dummy, sizeof(char)));
     }
 
     free(dummy);

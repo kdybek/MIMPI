@@ -51,7 +51,8 @@ _Noreturn extern void fatal(const char* fmt, ...);
 #define CHECK_IF_REMOTE_FINISHED(rank, ret)                                                \
     do {                                                                                   \
         if (ret == 0) {                                                                    \
-            ASSERT_SYS_OK(close(rank + MIMPI_GROUP_WRITE_OFFSET));                         \
+            ASSERT_SYS_OK(close(rank + MIMPI_GROUP_R_WRITE_OFFSET));                       \
+            ASSERT_SYS_OK(close(rank + MIMPI_GROUP_R_WRITE_OFFSET));                       \
             return MIMPI_ERROR_REMOTE_FINISHED;                                            \
         }                                                                                  \
     } while(0)
@@ -63,8 +64,10 @@ _Noreturn extern void fatal(const char* fmt, ...);
 #define MIMPI_SEM_WRITE_OFFSET 68
 #define MIMPI_QUEUE_READ_OFFSET 84
 #define MIMPI_QUEUE_WRITE_OFFSET 100
-#define MIMPI_GROUP_READ_OFFSET 116
-#define MIMPI_GROUP_WRITE_OFFSET 132
+#define MIMPI_GROUP_R_READ_OFFSET 116
+#define MIMPI_GROUP_R_WRITE_OFFSET 132
+#define MIMPI_GROUP_L_READ_OFFSET 148
+#define MIMPI_GROUP_L_WRITE_OFFSET 164
 
 // Signals:
 #define MIMPI_END 0

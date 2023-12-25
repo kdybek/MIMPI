@@ -12,7 +12,7 @@ int main() {
 
     if (MIMPI_World_rank() == 2) {
         int buf[1];
-        int ret = chrecv(MIMPI_GROUP_READ_OFFSET, buf, sizeof(int));
+        int ret = chrecv(MIMPI_GROUP_R_READ_OFFSET, buf, sizeof(int));
         printf("%d", ret);
     }
     return 0;
