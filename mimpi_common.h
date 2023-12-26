@@ -48,11 +48,12 @@ _Noreturn extern void fatal(const char* fmt, ...);
 /////////////////////////////////////////////
 // Put your declarations here
 
-#define CHECK_IF_REMOTE_FINISHED(rank, ret)                                                \
+#define CHECK_IF_REMOTE_FINISHED(ret, to_free1, to_free2, to_free3)                        \
     do {                                                                                   \
-        if (ret == 0) {                                                                    \
-            ASSERT_SYS_OK(close(rank + MIMPI_GROUP_R_WRITE_OFFSET));                       \
-            ASSERT_SYS_OK(close(rank + MIMPI_GROUP_R_WRITE_OFFSET));                       \
+        if (ret == MIMPI_ERROR_REMOTE_FINISHED) {                                          \
+            free(to_free1);                                                                \
+            free(to_free2);                                                                \
+            free(to_free3);                                                                \
             return MIMPI_ERROR_REMOTE_FINISHED;                                            \
         }                                                                                  \
     } while(0)

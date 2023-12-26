@@ -13,18 +13,10 @@
 /* Structs */
 typedef struct metadata
 {
-    int sender;
     int tag;
     int count;
 
 } metadata_t;
-
-typedef struct signal
-{
-    metadata_t metadata;
-    const void* data;
-
-} signal_t;
 
 typedef struct buffer_node
 {
@@ -32,18 +24,10 @@ typedef struct buffer_node
     int sender;
     int count;
     void* data;
-    struct buffer_node* next;
-    struct buffer_node* prev;
+    struct buffer_node* volatile next;
+    struct buffer_node* volatile prev;
 
 } buffer_node_t;
-
-typedef struct send_info
-{
-    void* data;
-    int n_bytes;
-    int destination;
-
-} send_info_t;
 
 /* Global Data */
 static pthread_mutex_t g_mutex;
@@ -52,9 +36,8 @@ static buffer_node_t* g_first_node;
 static buffer_node_t* g_last_node;
 static pthread_t thread[MIMPI_MAX_N];
 static volatile bool g_alive[MIMPI_MAX_N];
-static volatile bool g_main_waiting;
+static volatile int g_source;
 static volatile int g_tag;
-static volatile int g_sender;
 static volatile int g_count;
 
 /* Auxiliary Functions */
@@ -85,6 +68,36 @@ static void cleanup() {
         free(itr);
         itr = aux;
     }
+}
+
+// Tries to read the specified amount of bytes and no less.
+// Returns false in case no write descriptor for the channel is open.
+static bool thorough_read(void* buffer, size_t count, int fd) {
+    int bytes_read = 0;
+    int ret;
+
+    while (bytes_read < count) {
+        ret = chrecv(fd, buffer + bytes_read, count - bytes_read);
+        ASSERT_SYS_OK(ret);
+        if (ret == 0) return false;
+        bytes_read += ret;
+    }
+    return true;
+}
+
+// Tries to write the specified amount of bytes and no less.
+// Returns false in case no read descriptor for the channel is open.
+static bool thorough_write(void* buffer, size_t count, int fd, int dest) {
+    int bytes_read = 0;
+    int ret;
+
+    while (bytes_read < count) {
+        ret = chsend(fd, buffer + bytes_read, count - bytes_read);
+        if (ret == -1 && !g_alive[dest]) return false;
+        ASSERT_SYS_OK(ret);
+        bytes_read += ret;
+    }
+    return true;
 }
 
 // Never to be performed on g_first_node or g_last_node!!!
@@ -119,14 +132,6 @@ static inline bool is_root(int rank) {
     return rank == 0;
 }
 
-static inline bool is_left_child(int rank) {
-    return rank % 2 == 1;
-}
-
-static inline bool is_right_child(int rank) {
-    return !is_left_child(rank);
-}
-
 static int rank_adjust(int og_rank, int root) {
     if (og_rank == root) return 0;
     else if (og_rank == 0) return root;
@@ -137,10 +142,10 @@ static void reduction(u_int8_t* first, const u_int8_t* second, int size, MIMPI_O
     for (int i = 0; i < size; i++) {
         switch (op) {
             case MIMPI_MAX:
-                first[i] = first[i] > second[i] ? first[i] : second[i];
+                if(first[i] < second[i]) first[i] = second[i];
                 break;
             case MIMPI_MIN:
-                first[i] = first[i] < second[i] ? first[i] : second[i];
+                if(first[i] > second[i]) first[i] = second[i];
                 break;
             case MIMPI_SUM:
                 first[i] = first[i] + second[i];
@@ -179,26 +184,28 @@ static void* helper_main(void* data) {
     const int src = *dummy;
     free(dummy);
     const int rank = MIMPI_World_rank();
-    int ret;
     metadata_t mt;
 
     while (true) {
-        ret = chrecv(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank, &mt, sizeof(metadata_t));
-        ASSERT_SYS_OK(ret);
-        if (ret == 0) {
+        if (!thorough_read(&mt,
+                           sizeof(metadata_t),
+                           MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank)) {
             ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
             g_alive[src] = false;
             ASSERT_SYS_OK(close(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank));
             if (g_alive[rank]) { ASSERT_SYS_OK(close(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + src)); }
-            if (g_main_waiting) { ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog)); }
+            if (g_source == src) { ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog)); }
             else { ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex)); }
             break;
         }
 
         void* buf = malloc(mt.count);
-        ASSERT_SYS_OK(chrecv(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank, buf, mt.count));
+        // thorough_read should never return false here;
+        assert(thorough_read(buf,
+                             mt.count,
+                             MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank));
 
-        buffer_node_t* node = new_node(mt.tag, mt.sender, mt.count, buf);
+        buffer_node_t* node = new_node(mt.tag, src, mt.count, buf);
 
         ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
         g_last_node->prev->next = node;
@@ -206,9 +213,8 @@ static void* helper_main(void* data) {
         g_last_node->prev = node;
         node->next = g_last_node;
 
-        if (g_main_waiting &&
+        if (g_source == src &&
             tag_compare(g_tag, mt.tag) &&
-            g_sender == mt.sender &&
             g_count == mt.count) {
             ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog));
         } else {
@@ -218,13 +224,14 @@ static void* helper_main(void* data) {
     return NULL;
 }
 
+/* Library Function */
 void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
 
     ASSERT_ZERO(pthread_mutex_init(&g_mutex, NULL));
     ASSERT_ZERO(pthread_mutex_init(&g_main_prog, NULL));
-    ASSERT_SYS_OK(pthread_mutex_lock(&g_main_prog)); // I want this mutex initialized with 0.
-    g_main_waiting = false;
+    ASSERT_SYS_OK(pthread_mutex_lock(&g_main_prog)); // This mutex is initialized with 0.
+    g_source = -1;
     g_first_node = new_node(0, -1, 0, NULL);
     g_last_node = new_node(0, -1, 0, NULL);
     g_first_node->next = g_last_node;
@@ -258,6 +265,7 @@ void MIMPI_Finalize() {
         }
     }
 
+    cleanup();
     channels_finalize();
 }
 
@@ -276,20 +284,29 @@ MIMPI_Retcode MIMPI_Send(
         int tag
 ) {
     int rank = MIMPI_World_rank();
+
     if (destination == rank) return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     if (destination < 0 || destination >= MIMPI_World_size()) return MIMPI_ERROR_NO_SUCH_RANK;
     if (!g_alive[destination]) return MIMPI_ERROR_REMOTE_FINISHED;
+
     metadata_t mt;
-    mt.sender = rank;
     mt.tag = tag;
     mt.count = count;
+
     void* buf = malloc(count + sizeof(metadata_t));
     memcpy(buf, &mt, sizeof(metadata_t));
     memcpy(buf + sizeof(metadata_t), data, count);
 
-    ASSERT_SYS_OK(chsend(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + destination, buf, count + sizeof(metadata_t)));
-    free(buf);
-    return MIMPI_SUCCESS;
+    if(!thorough_write(buf,
+                       count + sizeof(metadata_t),
+                       MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + destination,
+                       destination)) {
+        free(buf);
+        return MIMPI_ERROR_REMOTE_FINISHED;
+    } else {
+        free(buf);
+        return MIMPI_SUCCESS;
+    }
 }
 
 MIMPI_Retcode MIMPI_Recv(
@@ -304,11 +321,13 @@ MIMPI_Retcode MIMPI_Recv(
 
     ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
     if (!find_and_delete(data, count, source, tag)) {
-        if (!g_alive[source]) return MIMPI_ERROR_REMOTE_FINISHED;
+        if (!g_alive[source]) {
+            ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+            return MIMPI_ERROR_REMOTE_FINISHED;
+        }
 
         // Give the helper info about what to look for.
-        g_main_waiting = true;
-        g_sender = source;
+        g_source = source;
         g_tag = tag;
         g_count = count;
 
@@ -316,7 +335,7 @@ MIMPI_Retcode MIMPI_Recv(
         ASSERT_SYS_OK(pthread_mutex_lock(&g_main_prog));
         // Critical section inheritance
 
-        g_main_waiting = false;
+        g_source = -1;
         buffer_node_t* candidate = g_last_node->prev;
 
         if (tag_compare(tag, candidate->tag) &&
@@ -336,9 +355,8 @@ MIMPI_Retcode MIMPI_Recv(
     }
 }
 
-/*
 MIMPI_Retcode MIMPI_Barrier() {
-    int ret;
+    MIMPI_Retcode ret;
     int rank = MIMPI_World_rank();
     int l = left_child(rank);
     int r = right_child(rank);
@@ -347,36 +365,31 @@ MIMPI_Retcode MIMPI_Barrier() {
     char* dummy = malloc(sizeof(char));
 
     if (has_left_child(rank)) {
-        // Parent reads from group r channel.
-        ret = chrecv(l + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
+        ret = MIMPI_Recv(dummy, sizeof(char), l, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (has_right_child(rank)) {
-        ret = chrecv(r + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
+        ret = MIMPI_Recv(dummy, sizeof(char), r, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (!is_root(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, dummy, sizeof(char)));
+        ret = MIMPI_Send(dummy, sizeof(char), p, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
 
-        int offset;
-        if (is_left_child(rank)) offset = MIMPI_GROUP_L_READ_OFFSET;
-        else offset = MIMPI_GROUP_R_READ_OFFSET;
-
-        ret = chrecv(p + offset, dummy, sizeof(char));
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
+        ret = MIMPI_Recv(dummy, sizeof(char), p, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (has_left_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_L_WRITE_OFFSET, dummy, sizeof(char)));
+        ret = MIMPI_Send(dummy, sizeof(char), l, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (has_right_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, dummy, sizeof(char)));
+        ret = MIMPI_Send(dummy, sizeof(char), r, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     free(dummy);
@@ -397,35 +410,31 @@ MIMPI_Retcode MIMPI_Bcast(
     char* dummy = malloc(sizeof(char));
 
     if (has_left_child(rank)) {
-        ret = chrecv(l + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
+        ret = MIMPI_Recv(dummy, sizeof(char), l, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (has_right_child(rank)) {
-        ret = chrecv(r + MIMPI_GROUP_R_READ_OFFSET, dummy, sizeof(char));
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
+        ret = MIMPI_Recv(dummy, sizeof(char), r, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (!is_root(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, dummy, sizeof(char)));
+        ret = MIMPI_Send(dummy, sizeof(char), p, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
 
-        int offset;
-        if (is_left_child(rank)) offset = MIMPI_GROUP_L_READ_OFFSET;
-        else offset = MIMPI_GROUP_R_READ_OFFSET;
-
-        ret = chrecv(p + offset, data, count);
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
+        ret = MIMPI_Recv(data, count, p, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (has_left_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_L_WRITE_OFFSET, data, count));
+        ret = MIMPI_Send(data, count, l, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     if (has_right_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, data, count));
+        ret = MIMPI_Send(data, count, r, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, NULL, NULL);
     }
 
     free(dummy);
@@ -446,45 +455,44 @@ MIMPI_Retcode MIMPI_Reduce(
     // If rank is the root of the tree, there will be garbage in p, but it won't be used.
     int p = rank_adjust(parent(rank), root);
     char* dummy = malloc(sizeof(char));
+    u_int8_t* res = malloc(count);
     u_int8_t* buf = malloc(count);
-    memcpy(buf, send_data, count);
+    memcpy(res, send_data, count);
 
     if (has_left_child(rank)) {
-        ret = chrecv(l + MIMPI_GROUP_R_READ_OFFSET, buf, count);
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
-        reduction(buf, send_data, count, op);
+        ret = MIMPI_Recv(buf, count, l, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, res, buf);
+        reduction(res, buf, count, op);
     }
 
     if (has_right_child(rank)) {
-        ret = chrecv(r + MIMPI_GROUP_R_READ_OFFSET, buf, count);
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
-        reduction(buf, send_data, count, op);
+        ret = MIMPI_Recv(buf, count, r, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, res, buf);
+        reduction(res, buf, count, op);
     }
 
     if (!is_root(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, buf, count));
+        ret = MIMPI_Send(res, count, p, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, res, buf);
 
-        int offset;
-        if (is_left_child(rank)) offset = MIMPI_GROUP_L_READ_OFFSET;
-        else offset = MIMPI_GROUP_R_READ_OFFSET;
-
-        ret = chrecv(p + offset, dummy, sizeof(char));
-        ASSERT_SYS_OK(ret);
-        CHECK_IF_REMOTE_FINISHED(rank, ret);
+        ret = MIMPI_Recv(dummy, sizeof(char), p, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, res, buf);
     } else {
-        memcpy(recv_data, buf, count);
+        memcpy(recv_data, res, count);
     }
 
     if (has_left_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_L_WRITE_OFFSET, dummy, sizeof(char)));
+        ret = MIMPI_Send(dummy, sizeof(char), l, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, res, buf);
     }
 
     if (has_right_child(rank)) {
-        ASSERT_SYS_OK(chsend(rank + MIMPI_GROUP_R_WRITE_OFFSET, dummy, sizeof(char)));
+        ret = MIMPI_Send(dummy, sizeof(char), r, -1);
+        CHECK_IF_REMOTE_FINISHED(ret, dummy, res, buf);
     }
 
     free(dummy);
+    free(res);
+    free(buf);
     return MIMPI_SUCCESS;
-}*/
+}
