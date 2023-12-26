@@ -11,12 +11,18 @@
 #include <unistd.h>
 
 /* Structs */
-typedef struct signal
+typedef struct metadata
 {
     int sender;
-    int type;
     int tag;
     int count;
+
+} metadata_t;
+
+typedef struct signal
+{
+    metadata_t metadata;
+    const void* data;
 
 } signal_t;
 
@@ -44,7 +50,8 @@ static pthread_mutex_t g_mutex;
 static pthread_mutex_t g_main_prog;
 static buffer_node_t* g_first_node;
 static buffer_node_t* g_last_node;
-static volatile bool g_alive[MIMPI_MAX_NUMBER_OF_PROCESSES];
+static pthread_t thread[MIMPI_MAX_N];
+static volatile bool g_alive[MIMPI_MAX_N];
 static volatile bool g_main_waiting;
 static volatile int g_tag;
 static volatile int g_sender;
@@ -95,13 +102,13 @@ static inline int right_child(int rank) { return left_child(rank) + 1; }
 static inline bool has_left_child(int rank) {
     int size = MIMPI_World_size();
 
-    return left_child(rank) >= size;
+    return left_child(rank) < size;
 }
 
 static inline bool has_right_child(int rank) {
     int size = MIMPI_World_size();
 
-    return right_child(rank) >= size;
+    return right_child(rank) < size;
 }
 
 static inline int parent(int rank) {
@@ -167,72 +174,47 @@ static bool find_and_delete(
     return false;
 }
 
-static void* helper_main() {
-    signal_t signal;
-    int rank = MIMPI_World_rank();
-    bool end = false;
-    char* dummy = malloc(sizeof(char));
+static void* helper_main(void* data) {
+    int* dummy = data;
+    const int src = *dummy;
+    free(dummy);
+    const int rank = MIMPI_World_rank();
+    int ret;
+    metadata_t mt;
 
-    while (!end) {
-        chrecv(rank + MIMPI_QUEUE_READ_OFFSET,
-               &signal,
-               sizeof(signal));
+    while (true) {
+        ret = chrecv(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank, &mt, sizeof(metadata_t));
+        ASSERT_SYS_OK(ret);
+        if (ret == 0) {
+            ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
+            g_alive[src] = false;
+            ASSERT_SYS_OK(close(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank));
+            if (g_alive[rank]) { ASSERT_SYS_OK(close(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + src)); }
+            if (g_main_waiting) { ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog)); }
+            else { ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex)); }
+            break;
+        }
 
-        switch (signal.type) {
-            case MIMPI_END:
-                ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
-                g_alive[signal.sender] = false;
-                if (signal.sender == rank) {
-                    end = true;
-                    if (g_main_waiting && g_sender == signal.sender) {
-                        ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog));
-                    } else {
-                        ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
-                    }
-                } else {
-                    ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
-                }
+        void* buf = malloc(mt.count);
+        ASSERT_SYS_OK(chrecv(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank, buf, mt.count));
 
-                // Hard to optimize as I don't have a guarantee that the process
-                // on the receiving end will still be g_alive when the message reaches it.
-                for (int i = 0; i < MIMPI_World_size(); i++) {
-                    if (g_alive[i]) {
-                        chsend(i + MIMPI_QUEUE_WRITE_OFFSET,
-                               &signal,
-                               sizeof(signal));
-                    }
-                }
-                break;
-            case MIMPI_SEND:
-                // Let the sender write his message to the main channel.
-                chsend(signal.sender + MIMPI_SEM_WRITE_OFFSET, dummy, sizeof(char));
+        buffer_node_t* node = new_node(mt.tag, mt.sender, mt.count, buf);
 
-                void* buff = malloc(signal.count);
-                chrecv(rank + MIMPI_MAIN_READ_OFFSET, buff, signal.count);
+        ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
+        g_last_node->prev->next = node;
+        node->prev = g_last_node->prev;
+        g_last_node->prev = node;
+        node->next = g_last_node;
 
-                buffer_node_t* node = new_node(signal.tag, signal.sender, signal.count, buff);
-
-                ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
-                g_last_node->prev->next = node;
-                node->prev = g_last_node->prev;
-                g_last_node->prev = node;
-                node->next = g_last_node;
-
-                if (g_main_waiting &&
-                    tag_compare(g_tag, signal.tag) &&
-                    g_sender == signal.sender &&
-                    g_count == signal.count) {
-                    ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog));
-                } else {
-                    ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
-                }
-                break;
+        if (g_main_waiting &&
+            tag_compare(g_tag, mt.tag) &&
+            g_sender == mt.sender &&
+            g_count == mt.count) {
+            ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog));
+        } else {
+            ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
         }
     }
-
-    free(dummy);
-    cleanup();
-    channels_finalize();
     return NULL;
 }
 
@@ -251,24 +233,32 @@ void MIMPI_Init(bool enable_deadlock_detection) {
         g_alive[i] = true;
     }
 
-    // Create thread attributes.
-    pthread_attr_t attr;
-    ASSERT_ZERO(pthread_attr_init(&attr));
-    ASSERT_ZERO(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
-
-    pthread_t thread;
-    ASSERT_ZERO(pthread_create(&thread, &attr, helper_main, NULL));
-
-    ASSERT_ZERO(pthread_attr_destroy(&attr));
+    for (int i = 0; i < MIMPI_World_size(); i++) {
+        if (i != MIMPI_World_rank()) {
+            int* thread_data = malloc(sizeof(int));
+            *thread_data = i;
+            ASSERT_ZERO(pthread_create(&thread[i], NULL, helper_main, thread_data));
+        }
+    }
 }
 
 void MIMPI_Finalize() {
-    int rank = MIMPI_World_rank();
-    signal_t sig;
-    sig.sender = rank;
-    sig.type = MIMPI_END;
-    chsend(rank + MIMPI_QUEUE_WRITE_OFFSET, &sig, sizeof(sig));
-    // Helper will take care of the cleanup.
+    ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
+    g_alive[MIMPI_World_rank()] = false;
+    for (int i = 0; i < MIMPI_World_size(); i++) {
+        if (g_alive[i]) {
+            ASSERT_SYS_OK(close(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * MIMPI_World_rank() + i));
+        }
+    }
+    ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+
+    for (int i = 0; i < MIMPI_World_size(); i++) {
+        if (i != MIMPI_World_rank()) {
+            ASSERT_ZERO(pthread_join(thread[i], NULL));
+        }
+    }
+
+    channels_finalize();
 }
 
 int MIMPI_World_size() {
@@ -289,16 +279,16 @@ MIMPI_Retcode MIMPI_Send(
     if (destination == rank) return MIMPI_ERROR_ATTEMPTED_SELF_OP;
     if (destination < 0 || destination >= MIMPI_World_size()) return MIMPI_ERROR_NO_SUCH_RANK;
     if (!g_alive[destination]) return MIMPI_ERROR_REMOTE_FINISHED;
-    char* dummy = NULL;
-    signal_t sig;
-    sig.sender = rank;
-    sig.tag = tag;
-    sig.count = count;
-    sig.type = MIMPI_SEND;
+    metadata_t mt;
+    mt.sender = rank;
+    mt.tag = tag;
+    mt.count = count;
+    void* buf = malloc(count + sizeof(metadata_t));
+    memcpy(buf, &mt, sizeof(metadata_t));
+    memcpy(buf + sizeof(metadata_t), data, count);
 
-    ASSERT_SYS_OK(chsend(destination + MIMPI_QUEUE_WRITE_OFFSET, &sig, sizeof(sig)));
-    ASSERT_SYS_OK(chrecv(rank + MIMPI_SEM_READ_OFFSET, dummy, sizeof(char)));
-    ASSERT_SYS_OK(chsend(destination + MIMPI_MAIN_WRITE_OFFSET, data, count));
+    ASSERT_SYS_OK(chsend(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + destination, buf, count + sizeof(metadata_t)));
+    free(buf);
     return MIMPI_SUCCESS;
 }
 
@@ -346,6 +336,7 @@ MIMPI_Retcode MIMPI_Recv(
     }
 }
 
+/*
 MIMPI_Retcode MIMPI_Barrier() {
     int ret;
     int rank = MIMPI_World_rank();
@@ -496,4 +487,4 @@ MIMPI_Retcode MIMPI_Reduce(
 
     free(dummy);
     return MIMPI_SUCCESS;
-}
+}*/

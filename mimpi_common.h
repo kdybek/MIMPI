@@ -58,22 +58,10 @@ _Noreturn extern void fatal(const char* fmt, ...);
     } while(0)
 
 // Offsets:
-#define MIMPI_MAIN_READ_OFFSET 20
-#define MIMPI_MAIN_WRITE_OFFSET 36
-#define MIMPI_SEM_READ_OFFSET 52
-#define MIMPI_SEM_WRITE_OFFSET 68
-#define MIMPI_QUEUE_READ_OFFSET 84
-#define MIMPI_QUEUE_WRITE_OFFSET 100
-#define MIMPI_GROUP_R_READ_OFFSET 116
-#define MIMPI_GROUP_R_WRITE_OFFSET 132
-#define MIMPI_GROUP_L_READ_OFFSET 148
-#define MIMPI_GROUP_L_WRITE_OFFSET 164
-
-// Signals:
-#define MIMPI_END 0
-#define MIMPI_SEND 1
+#define MIMPI_READ_OFFSET 20
+#define MIMPI_WRITE_OFFSET 500
 
 // Misc:
-#define MIMPI_MAX_NUMBER_OF_PROCESSES 16
+#define MIMPI_MAX_N 16
 
 #endif // MIMPI_COMMON_H

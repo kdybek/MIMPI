@@ -12,30 +12,28 @@
 #define READ 0
 #define WRITE 1
 
- void open_channels(int read_offset, int write_offset, int n) {
+ void open_channel(int read_dsc, int write_dsc) {
      int channel_dsc[2];
      int new_dsc;
 
-     for (int i = 0; i < n; i++) {
-         ASSERT_SYS_OK(channel(channel_dsc));
+     ASSERT_SYS_OK(channel(channel_dsc));
 
-         // Check if current write descriptor and future read descriptor collide.
-         if (channel_dsc[WRITE] == i + read_offset) {
-            new_dsc = dup(channel_dsc[WRITE]);
-            ASSERT_SYS_OK(new_dsc);
-            ASSERT_SYS_OK(close(channel_dsc[WRITE]));
-            channel_dsc[WRITE] = new_dsc;
-         }
+     // Check if current write descriptor and future read descriptor collide.
+     if (channel_dsc[WRITE] == read_dsc) {
+         new_dsc = dup(channel_dsc[WRITE]);
+         ASSERT_SYS_OK(new_dsc);
+         ASSERT_SYS_OK(close(channel_dsc[WRITE]));
+         channel_dsc[WRITE] = new_dsc;
+     }
 
-         if (channel_dsc[READ] != i + read_offset) {
-             ASSERT_SYS_OK(dup2(channel_dsc[READ], i + read_offset));
-             ASSERT_SYS_OK(close(channel_dsc[READ]));
-         }
+     if (channel_dsc[READ] != read_dsc) {
+         ASSERT_SYS_OK(dup2(channel_dsc[READ], read_dsc));
+         ASSERT_SYS_OK(close(channel_dsc[READ]));
+     }
 
-         if (channel_dsc[WRITE] != i + write_offset) {
-             ASSERT_SYS_OK(dup2(channel_dsc[WRITE], i + write_offset));
-             ASSERT_SYS_OK(close(channel_dsc[WRITE]));
-         }
+     if (channel_dsc[WRITE] != write_dsc) {
+         ASSERT_SYS_OK(dup2(channel_dsc[WRITE], write_dsc));
+         ASSERT_SYS_OK(close(channel_dsc[WRITE]));
      }
 }
 
@@ -52,56 +50,34 @@ int main(int argc, char** argv) {
     char** args = &argv[2];
     args[0] = prog;
 
-    open_channels(MIMPI_MAIN_READ_OFFSET,
-                  MIMPI_MAIN_WRITE_OFFSET, n);
-    open_channels(MIMPI_SEM_READ_OFFSET,
-                  MIMPI_SEM_WRITE_OFFSET, n);
-    open_channels(MIMPI_QUEUE_READ_OFFSET,
-                  MIMPI_QUEUE_WRITE_OFFSET, n);
-    open_channels(MIMPI_GROUP_R_READ_OFFSET,
-                  MIMPI_GROUP_R_WRITE_OFFSET, n);
-    open_channels(MIMPI_GROUP_L_READ_OFFSET,
-                  MIMPI_GROUP_L_WRITE_OFFSET, n);
-
     for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (i != j) {
+                open_channel(MIMPI_READ_OFFSET + MIMPI_MAX_N * i + j,
+                             MIMPI_WRITE_OFFSET + MIMPI_MAX_N * i + j);
+            }
+        }
+    }
+
+    for (int k = 0; k < n; k++) {
         pid_t pid = fork();
         ASSERT_SYS_OK(pid);
+
         if (!pid) {
-            // Close the main write descriptor.
-            ASSERT_SYS_OK(close(i + MIMPI_MAIN_WRITE_OFFSET));
 
-            // Close the semaphore write descriptors.
-            ASSERT_SYS_OK(close(i + MIMPI_SEM_WRITE_OFFSET));
-
-            // Close the group p read descriptor.
-            ASSERT_SYS_OK(close(i + MIMPI_GROUP_R_READ_OFFSET));
-
-            // Close the group l read descriptor.
-            ASSERT_SYS_OK(close(i + MIMPI_GROUP_L_READ_OFFSET));
-
-            for (int j = 0; j < n; j++) {
-                if (j != i) {
-                    // Close the main read descriptors.
-                    ASSERT_SYS_OK(close(j + MIMPI_MAIN_READ_OFFSET));
-
-                    // Close the semaphore read descriptor.
-                    ASSERT_SYS_OK(close(j + MIMPI_SEM_READ_OFFSET));
-
-                    // Close the queue read descriptors.
-                    ASSERT_SYS_OK(close(j + MIMPI_QUEUE_READ_OFFSET));
-
-                    // Close the group p write descriptor.
-                    ASSERT_SYS_OK(close(j + MIMPI_GROUP_R_WRITE_OFFSET));
-
-                    // Close the group l write descriptor.
-                    ASSERT_SYS_OK(close(j + MIMPI_GROUP_L_WRITE_OFFSET));
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    if (i != j) {
+                        if (j != k) { ASSERT_SYS_OK(close(MIMPI_READ_OFFSET + MIMPI_MAX_N * i + j)); }
+                        if (i != k) { ASSERT_SYS_OK(close(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * i + j)); }
+                    }
                 }
             }
 
             // Add additional info to environment.
-            char i_str[4];
-            int ret = snprintf(i_str, sizeof(i_str), "%d", i);
-            if (ret < 0 || ret >= (int) sizeof(i_str)) {
+            char k_str[4];
+            int ret = snprintf(k_str, sizeof(k_str), "%d", k);
+            if (ret < 0 || ret >= (int) sizeof(k_str)) {
                 fatal("Error in snprintf.");
             }
 
@@ -111,7 +87,7 @@ int main(int argc, char** argv) {
                 fatal("Error in snprintf.");
             }
 
-            ASSERT_SYS_OK(setenv("MIMPI_rank", i_str, true));
+            ASSERT_SYS_OK(setenv("MIMPI_rank", k_str, true));
             ASSERT_SYS_OK(setenv("MIMPI_size", n_str, true));
 
             ASSERT_SYS_OK(execvp(prog, args));
@@ -119,14 +95,12 @@ int main(int argc, char** argv) {
     }
 
     for (int i = 0; i < n; i++) {
-        ASSERT_SYS_OK(close(i + MIMPI_MAIN_READ_OFFSET));
-        ASSERT_SYS_OK(close(i + MIMPI_MAIN_WRITE_OFFSET));
-        ASSERT_SYS_OK(close(i + MIMPI_SEM_READ_OFFSET));
-        ASSERT_SYS_OK(close(i + MIMPI_SEM_WRITE_OFFSET));
-        ASSERT_SYS_OK(close(i + MIMPI_QUEUE_READ_OFFSET));
-        ASSERT_SYS_OK(close(i + MIMPI_QUEUE_WRITE_OFFSET));
-        ASSERT_SYS_OK(close(i + MIMPI_GROUP_R_READ_OFFSET));
-        ASSERT_SYS_OK(close(i + MIMPI_GROUP_R_WRITE_OFFSET));
+        for (int j = 0; j < n; j++) {
+            if (i != j) {
+                ASSERT_SYS_OK(close(MIMPI_READ_OFFSET + MIMPI_MAX_N * i + j));
+                ASSERT_SYS_OK(close(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * i + j));
+            }
+        }
     }
 
     for (int i = 0; i < n; i++) {
