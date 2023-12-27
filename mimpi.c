@@ -31,7 +31,7 @@ typedef struct buffer_node
 
 /* Global Data */
 static pthread_mutex_t g_mutex;
-static pthread_mutex_t g_main_prog;
+static pthread_mutex_t g_on_recv;
 static buffer_node_t* g_first_node;
 static buffer_node_t* g_last_node;
 static pthread_t thread[MIMPI_MAX_N];
@@ -42,7 +42,7 @@ static volatile int g_count;
 
 /* Auxiliary Functions */
 static bool tag_compare(int t1, int t2) {
-    return t1 == MIMPI_ANY_TAG || t1 == t2;
+    return (t1 == MIMPI_ANY_TAG && t2 > 0) || t1 == t2;
 }
 
 static buffer_node_t* new_node(int tag, int sender, int count, void* data) {
@@ -58,7 +58,7 @@ static buffer_node_t* new_node(int tag, int sender, int count, void* data) {
 
 static void cleanup() {
     ASSERT_SYS_OK(pthread_mutex_destroy(&g_mutex));
-    ASSERT_SYS_OK(pthread_mutex_destroy(&g_main_prog));
+    ASSERT_SYS_OK(pthread_mutex_destroy(&g_on_recv));
     buffer_node_t* itr = g_first_node;
     buffer_node_t* aux;
 
@@ -194,7 +194,7 @@ static void* helper_main(void* data) {
             g_alive[src] = false;
             ASSERT_SYS_OK(close(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank));
             if (g_alive[rank]) { ASSERT_SYS_OK(close(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + src)); }
-            if (g_source == src) { ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog)); }
+            if (g_source == src) { ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv)); }
             else { ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex)); }
             break;
         }
@@ -216,7 +216,7 @@ static void* helper_main(void* data) {
         if (g_source == src &&
             tag_compare(g_tag, mt.tag) &&
             g_count == mt.count) {
-            ASSERT_SYS_OK(pthread_mutex_unlock(&g_main_prog));
+            ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv));
         } else {
             ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
         }
@@ -229,8 +229,8 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     channels_init();
 
     ASSERT_ZERO(pthread_mutex_init(&g_mutex, NULL));
-    ASSERT_ZERO(pthread_mutex_init(&g_main_prog, NULL));
-    ASSERT_SYS_OK(pthread_mutex_lock(&g_main_prog)); // This mutex is initialized with 0.
+    ASSERT_ZERO(pthread_mutex_init(&g_on_recv, NULL));
+    ASSERT_SYS_OK(pthread_mutex_lock(&g_on_recv)); // This mutex is initialized with 0.
     g_source = -1;
     g_first_node = new_node(0, -1, 0, NULL);
     g_last_node = new_node(0, -1, 0, NULL);
@@ -332,7 +332,7 @@ MIMPI_Retcode MIMPI_Recv(
         g_count = count;
 
         ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
-        ASSERT_SYS_OK(pthread_mutex_lock(&g_main_prog));
+        ASSERT_SYS_OK(pthread_mutex_lock(&g_on_recv));
         // Critical section inheritance
 
         g_source = -1;
