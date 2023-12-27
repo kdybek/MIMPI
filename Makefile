@@ -1,4 +1,4 @@
-.PHONY: all my_test  clean
+.PHONY: all my_test clean
 
 EXAMPLES := $(addprefix examples_build/,$(notdir $(basename $(wildcard examples/*.c))))
 FILES_ALLOWED_FOR_CHANGE := $(shell cat files_allowed_for_change)

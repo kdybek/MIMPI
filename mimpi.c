@@ -11,8 +11,24 @@
 #include <unistd.h>
 
 /* Structs */
+typedef enum {
+    SEND = 0,
+    WAITING = 1,
+    DEADLOCK = 2
+
+} send_signal_t;
+
+typedef enum {
+    MESSAGE_ARRIVED = 0,
+    PROCESS_ENDED = 1,
+    DEADLOCK_DETECTED_1 = 2,
+    DEADLOCK_DETECTED_2 = 3
+
+} recv_signal_t;
+
 typedef struct metadata
 {
+    send_signal_t signal;
     int tag;
     int count;
 
@@ -36,9 +52,11 @@ static buffer_node_t* g_first_node;
 static buffer_node_t* g_last_node;
 static pthread_t thread[MIMPI_MAX_N];
 static volatile bool g_alive[MIMPI_MAX_N];
-static volatile int g_source;
-static volatile int g_tag;
-static volatile int g_count;
+static volatile int g_source; // If g_source != -1, main program is waiting for a message from g_source.
+static volatile int g_tag; // If g_source != -1, main program is waiting for a message with g_tag.
+static volatile int g_count; // If g_source != -1, main program is waiting for a message of g_count bytes.
+static volatile recv_signal_t g_recv_sig;
+static volatile bool g_deadlock_detection;
 
 /* Auxiliary Functions */
 static bool tag_compare(int t1, int t2) {
@@ -194,31 +212,55 @@ static void* helper_main(void* data) {
             g_alive[src] = false;
             ASSERT_SYS_OK(close(MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank));
             if (g_alive[rank]) { ASSERT_SYS_OK(close(MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + src)); }
-            if (g_source == src) { ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv)); }
+            if (g_source == src) {
+                g_recv_sig = PROCESS_ENDED;
+                ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv));
+            }
             else { ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex)); }
             break;
         }
 
-        void* buf = malloc(mt.count);
-        // thorough_read should never return false here;
-        assert(thorough_read(buf,
-                             mt.count,
-                             MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank));
+        void* buf;
 
-        buffer_node_t* node = new_node(mt.tag, src, mt.count, buf);
+        switch(mt.signal) {
+            case SEND:
+                buf = malloc(mt.count);
+                // thorough_read should never return false here;
+                assert(thorough_read(buf,
+                                     mt.count,
+                                     MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank));
 
-        ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
-        g_last_node->prev->next = node;
-        node->prev = g_last_node->prev;
-        g_last_node->prev = node;
-        node->next = g_last_node;
+                buffer_node_t* node = new_node(mt.tag, src, mt.count, buf);
 
-        if (g_source == src &&
-            tag_compare(g_tag, mt.tag) &&
-            g_count == mt.count) {
-            ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv));
-        } else {
-            ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+                ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
+                g_last_node->prev->next = node;
+                node->prev = g_last_node->prev;
+                g_last_node->prev = node;
+                node->next = g_last_node;
+
+                if (g_source == src &&
+                    tag_compare(g_tag, mt.tag) &&
+                    g_count == mt.count) {
+                    g_recv_sig = MESSAGE_ARRIVED;
+                    ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv));
+                } else {
+                    ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+                }
+                break;
+            case WAITING:
+                ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
+                if (g_source == src) { // There is a deadlock.
+                    g_recv_sig = DEADLOCK_DETECTED_1;
+                    ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv));
+                } else {
+                    ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+                }
+                break;
+            case DEADLOCK:
+                ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
+                g_recv_sig = DEADLOCK_DETECTED_2;
+                ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv));
+                break;
         }
     }
     return NULL;
@@ -232,6 +274,7 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     ASSERT_ZERO(pthread_mutex_init(&g_on_recv, NULL));
     ASSERT_SYS_OK(pthread_mutex_lock(&g_on_recv)); // This mutex is initialized with 0.
     g_source = -1;
+    g_deadlock_detection = enable_deadlock_detection;
     g_first_node = new_node(0, -1, 0, NULL);
     g_last_node = new_node(0, -1, 0, NULL);
     g_first_node->next = g_last_node;
@@ -290,6 +333,7 @@ MIMPI_Retcode MIMPI_Send(
     if (!g_alive[destination]) return MIMPI_ERROR_REMOTE_FINISHED;
 
     metadata_t mt;
+    mt.signal = SEND;
     mt.tag = tag;
     mt.count = count;
 
@@ -332,23 +376,48 @@ MIMPI_Retcode MIMPI_Recv(
         g_count = count;
 
         ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+
+        if (g_deadlock_detection) {
+            metadata_t mt;
+            mt.signal = WAITING;
+
+            thorough_write(&mt,
+                           sizeof(metadata_t),
+                           MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + source,
+                           source);
+        }
+
         ASSERT_SYS_OK(pthread_mutex_lock(&g_on_recv));
         // Critical section inheritance
 
         g_source = -1;
-        buffer_node_t* candidate = g_last_node->prev;
 
-        if (tag_compare(tag, candidate->tag) &&
-        source == candidate->sender &&
-        count == candidate->count) {
-            memcpy(data, candidate->data, count);
-            del_node(candidate);
-            ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
-            return MIMPI_SUCCESS;
-        } else { // main was woken up, because source left the MIMPI block.
-            ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
-            return MIMPI_ERROR_REMOTE_FINISHED;
+        switch(g_recv_sig) {
+            case MESSAGE_ARRIVED:
+                memcpy(data, g_last_node->prev->data, count);
+                del_node(g_last_node->prev);
+                ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+                return MIMPI_SUCCESS;
+            case PROCESS_ENDED:
+                ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+                return MIMPI_ERROR_REMOTE_FINISHED;
+            case DEADLOCK_DETECTED_1:
+                ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+
+                metadata_t mt;
+                mt.signal = DEADLOCK;
+
+                thorough_write(&mt,
+                               sizeof(metadata_t),
+                               MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + source,
+                               source);
+
+                return MIMPI_ERROR_DEADLOCK_DETECTED;
+            case DEADLOCK_DETECTED_2:
+                ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
+                return MIMPI_ERROR_DEADLOCK_DETECTED;
         }
+        return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
         ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
         return MIMPI_SUCCESS;

@@ -42,13 +42,12 @@ int main(int argc, char** argv) {
         fatal("Usage: %s program_name number_of_processes [...]\n", argv[0]);
     }
 
-    const int n = atoi(argv[2]);
-    char* prog = argv[1];
+    const int n = atoi(argv[1]);
+    char* prog = argv[2];
 
     // A roundabout way to get the arguments for exec.
     // argv[2] gets overridden, but we already saved that as n.
     char** args = &argv[2];
-    args[0] = prog;
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
