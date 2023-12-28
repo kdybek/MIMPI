@@ -2,26 +2,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <unistd.h>
 #include "mimpi.h"
-#include "mimpi_err.h"
+#include "channel.h"
 
-#define WRITE_VAR "CHANNELS_WRITE_DELAY"
 
 int main(int argc, char **argv)
 {
-    MIMPI_Init(false);
-    printf("before\n");
-    fflush(stdout);
-    const char *delay = getenv("DELAY");
-    if (delay)
-    {
-        int res = setenv(WRITE_VAR, delay, true);
-        assert(res == 0);
-    }
-    ASSERT_MIMPI_OK(MIMPI_Barrier());
-    int res = unsetenv(WRITE_VAR);
-    assert(res == 0);
-    printf("after\n");
+    // Open MPI block with deadlock detection on
+    MIMPI_Init(true);
+
+    int const world_rank = MIMPI_World_rank();
+    // Silently assumes even number of processes
+    int partner_rank = (world_rank / 2 * 2) + 1 - world_rank % 2;
+
+    char number;
+    // First deadlock
+    assert(MIMPI_Recv(&number, 1, partner_rank, 1) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    // Second deadlock
+    assert(MIMPI_Recv(&number, 1, partner_rank, 2) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 3) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 4) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 5) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 6) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 1) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 1) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 1) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 1) == MIMPI_ERROR_DEADLOCK_DETECTED);
+    assert(MIMPI_Recv(&number, 1, partner_rank, 1) == MIMPI_ERROR_DEADLOCK_DETECTED);
+
+
     MIMPI_Finalize();
     return 0;
 }
