@@ -45,8 +45,6 @@ int main(int argc, char** argv) {
     const int n = atoi(argv[1]);
     char* prog = argv[2];
 
-    // A roundabout way to get the arguments for exec.
-    // argv[2] gets overridden, but we already saved that as n.
     char** args = &argv[2];
 
     for (int i = 0; i < n; i++) {
