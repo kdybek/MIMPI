@@ -286,11 +286,13 @@ static void* helper_main(void* data) {
                     g_num_recv[src] == mt.num_sent) { // There is a deadlock.
 
                     g_recv_sig = DEADLOCK_DETECTED;
+
                     ASSERT_SYS_OK(pthread_mutex_unlock(&g_on_recv));
                 }
                 else if (g_num_sent[src] == mt.num_recv) { // src got all my messages.
                     g_is_waiting_on_recv[src] = true;
                     g_num_sent_to_me[src] = mt.num_sent;
+
                     ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
                 }
                 else { ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex)); }
@@ -315,9 +317,9 @@ void MIMPI_Init(bool enable_deadlock_detection) {
     g_last_node->prev = g_first_node;
     for (int i = 0; i < MIMPI_World_size(); i++) {
         g_alive[i] = true;
+        g_is_waiting_on_recv[i] = false;
         g_num_sent[i] = 0;
         g_num_recv[i] = 0;
-        g_num_sent_to_me[i] = -1; // -1 means unknown.
     }
 
     for (int i = 0; i < MIMPI_World_size(); i++) {
@@ -379,14 +381,12 @@ MIMPI_Retcode MIMPI_Send(
     memcpy(buf, &mt, sizeof(metadata_t));
     memcpy(buf + sizeof(metadata_t), data, count);
 
-    if (g_deadlock_detection) {
-        ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
+    ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
 
-        g_num_sent[destination]++;
-        g_is_waiting_on_recv[destination] = false;
+    g_num_sent[destination]++;
+    g_is_waiting_on_recv[destination] = false;
 
-        ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
-    }
+    ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
 
     bool ret = thorough_write(buf,
                              count + sizeof(metadata_t),
@@ -436,10 +436,12 @@ MIMPI_Retcode MIMPI_Recv(
         g_source = source;
         g_tag = tag;
         g_count = count;
+        recv = g_num_recv[source];
+        sent = g_num_sent[source];
 
         ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
 
-        send_waiting(source, tag, count);
+        send_waiting(source, recv, sent);
 
         while (true) {
             ASSERT_SYS_OK(pthread_mutex_lock(&g_on_recv));
