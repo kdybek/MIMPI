@@ -64,5 +64,6 @@ _Noreturn extern void fatal(const char* fmt, ...);
 
 // Misc:
 #define MIMPI_MAX_N 16
+#define MIMPI_READ_BUFFER_SIZE 512
 
 #endif // MIMPI_COMMON_H

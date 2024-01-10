@@ -97,15 +97,35 @@ static void cleanup() {
 
 // Tries to read the specified amount of bytes and no less.
 // Returns false in case no write descriptor for the channel is open.
-static bool thorough_read(void* buffer, size_t count, int fd) {
+static bool thorough_read(void* read_buf, int* offset, int* fillup, void* res_buf, int count, int fd) {
+    int left_in_buf;
+    int to_read = count;
     int bytes_read = 0;
+    int min;
     int ret;
 
-    while (bytes_read < count) {
-        ret = chrecv(fd, buffer + bytes_read, count - bytes_read);
-        ASSERT_SYS_OK(ret);
-        if (ret == 0) return false;
-        bytes_read += ret;
+    while (to_read > 0) {
+        if (left_in_buf == 0) {
+            ret = chrecv(fd, read_buf, MIMPI_READ_BUFFER_SIZE);
+            ASSERT_SYS_OK(ret);
+            if (ret == 0) return false;
+            *offset = 0;
+            *fillup = ret;
+        }
+
+        left_in_buf = *fillup - *offset;
+        min = (left_in_buf < to_read) ? left_in_buf : to_read;
+
+        memcpy(res_buf + bytes_read,
+               read_buf + *offset,
+               min);
+
+        bytes_read += min;
+        to_read -= min;
+        *offset += min;
+        left_in_buf -= min;
+
+        assert(left_in_buf >= 0);
     }
     return true;
 }
@@ -224,10 +244,13 @@ static void* helper_main(void* data) {
     free(dummy);
     const int rank = MIMPI_World_rank();
     metadata_t mt;
+    int8_t read_buff[MIMPI_READ_BUFFER_SIZE];
+    int offset = 0;
+    int fillup = 0;
 
     while (true) {
-        if (!thorough_read(&mt,
-                           sizeof(metadata_t),
+        if (!thorough_read(read_buff, &offset, &fillup,
+                           &mt, sizeof(metadata_t),
                            MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank)) {
 
             ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
@@ -245,16 +268,16 @@ static void* helper_main(void* data) {
             break;
         }
 
-        void* buf;
+        void* buff;
 
         switch(mt.signal) {
             case SEND:
-                buf = malloc(mt.count);
-                thorough_read(buf,
-                              mt.count,
+                buff = malloc(mt.count);
+                thorough_read(read_buff, &offset,
+                              &fillup, buff, mt.count,
                               MIMPI_READ_OFFSET + MIMPI_MAX_N * src + rank);
 
-                buffer_node_t* node = new_node(mt.tag, src, mt.count, buf);
+                buffer_node_t* node = new_node(mt.tag, src, mt.count, buff);
 
                 ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
 
