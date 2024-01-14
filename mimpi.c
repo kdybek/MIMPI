@@ -98,7 +98,7 @@ static void cleanup() {
 // Tries to read the specified amount of bytes and no less.
 // Returns false in case no write descriptor for the channel is open.
 static bool thorough_read(void* read_buf, int* offset, int* fillup, void* res_buf, int count, int fd) {
-    int left_in_buf;
+    int left_in_buf = *fillup - *offset;
     int to_read = count;
     int bytes_read = 0;
     int min;
@@ -133,14 +133,14 @@ static bool thorough_read(void* read_buf, int* offset, int* fillup, void* res_bu
 // Tries to write the specified amount of bytes and no less.
 // Returns false in case no read descriptor for the channel is open.
 static bool thorough_write(void* buffer, size_t count, int fd, int dest) {
-    int bytes_read = 0;
+    int bytes_written = 0;
     int ret;
 
-    while (bytes_read < count) {
-        ret = chsend(fd, buffer + bytes_read, count - bytes_read);
+    while (bytes_written < count) {
+        ret = chsend(fd, buffer + bytes_written, count - bytes_written);
         if (ret == -1 && !g_alive[dest]) return false;
         ASSERT_SYS_OK(ret);
-        bytes_read += ret;
+        bytes_written += ret;
     }
     return true;
 }
@@ -206,6 +206,8 @@ static void send_waiting(int dest, int recv, int sent) {
     if (g_deadlock_detection) {
         metadata_t mt;
         mt.signal = WAITING;
+        mt.tag = 0;
+        mt.count = 0;
         mt.num_recv = recv;
         mt.num_sent = sent;
 
@@ -399,6 +401,8 @@ MIMPI_Retcode MIMPI_Send(
     mt.signal = SEND;
     mt.tag = tag;
     mt.count = count;
+    mt.num_recv = 0;
+    mt.num_sent = 0;
 
     void* buf = malloc(count + sizeof(metadata_t));
     memcpy(buf, &mt, sizeof(metadata_t));
