@@ -52,6 +52,7 @@ static pthread_mutex_t g_on_recv;
 static buffer_node_t* g_first_node;
 static buffer_node_t* g_last_node;
 static pthread_t thread[MIMPI_MAX_N];
+static u_int8_t g_write_buf[MIMPI_WRITE_BUFFER_SIZE];
 static volatile bool g_alive[MIMPI_MAX_N];
 static volatile int g_source; // If g_source != -1, main program is waiting for a message from g_source.
 static volatile int g_tag; // If g_source != -1, main program is waiting for a message with g_tag.
@@ -95,6 +96,10 @@ static void cleanup() {
     }
 }
 
+static int minimum(int a, int b) {
+    return (a < b) ? a : b;
+}
+
 // Tries to read the specified amount of bytes and no less.
 // Returns false in case no write descriptor for the channel is open.
 static bool thorough_read(void* read_buf, int* offset, int* fillup, void* res_buf, int count, int fd) {
@@ -114,7 +119,7 @@ static bool thorough_read(void* read_buf, int* offset, int* fillup, void* res_bu
         }
 
         left_in_buf = *fillup - *offset;
-        min = (left_in_buf < to_read) ? left_in_buf : to_read;
+        min = minimum(left_in_buf, to_read);
 
         memcpy(res_buf + bytes_read,
                read_buf + *offset,
@@ -130,17 +135,43 @@ static bool thorough_read(void* read_buf, int* offset, int* fillup, void* res_bu
     return true;
 }
 
-// Tries to write the specified amount of bytes and no less.
-// Returns false in case no read descriptor for the channel is open.
-static bool thorough_write(void* buffer, size_t count, int fd, int dest) {
-    int bytes_written = 0;
+static bool send_aux(int bytes_to_send, int fd, int dest) {
     int ret;
+    int bytes_written = 0;
 
-    while (bytes_written < count) {
-        ret = chsend(fd, buffer + bytes_written, count - bytes_written);
+    while (bytes_written < bytes_to_send) {
+        ret = chsend(fd, g_write_buf + bytes_written, bytes_to_send - bytes_written);
         if (ret == -1 && !g_alive[dest]) return false;
         ASSERT_SYS_OK(ret);
         bytes_written += ret;
+    }
+    return true;
+}
+
+// Tries to write the metadata and data of count bytes and no less.
+// Returns false in case no read descriptor for the channel is open.
+static bool thorough_write(metadata_t mt, const void* data, int count, int fd, int dest) {
+    int bytes_to_copy = minimum(count, MIMPI_WRITE_BUFFER_SIZE - sizeof(metadata_t));
+    int offset = 0;
+
+    memcpy(g_write_buf, &mt, sizeof(metadata_t)); // I assume that metadata_t is small enough to fit.
+
+    if (count > 0) { memcpy(g_write_buf + sizeof(metadata_t), data, bytes_to_copy); }
+
+    if (!send_aux(bytes_to_copy + sizeof(metadata_t), fd, dest)) { return false; }
+
+    count -= bytes_to_copy;
+    offset += bytes_to_copy;
+
+    while (count > 0) {
+        bytes_to_copy = minimum(count, MIMPI_WRITE_BUFFER_SIZE);
+
+        memcpy(g_write_buf, data + offset, bytes_to_copy);
+
+        if (!send_aux(bytes_to_copy, fd, dest)) { return false; }
+
+        count -= bytes_to_copy;
+        offset += bytes_to_copy;
     }
     return true;
 }
@@ -211,8 +242,7 @@ static void send_waiting(int dest, int recv, int sent) {
         mt.num_recv = recv;
         mt.num_sent = sent;
 
-        thorough_write(&mt,
-                       sizeof(metadata_t),
+        thorough_write(mt, NULL,0,
                        MIMPI_WRITE_OFFSET + MIMPI_MAX_N * MIMPI_World_rank() + dest,
                        dest);
     }
@@ -404,10 +434,6 @@ MIMPI_Retcode MIMPI_Send(
     mt.num_recv = 0;
     mt.num_sent = 0;
 
-    void* buf = malloc(count + sizeof(metadata_t));
-    memcpy(buf, &mt, sizeof(metadata_t));
-    memcpy(buf + sizeof(metadata_t), data, count);
-
     ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
 
     g_num_sent[destination]++;
@@ -415,12 +441,10 @@ MIMPI_Retcode MIMPI_Send(
 
     ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
 
-    bool ret = thorough_write(buf,
-                             count + sizeof(metadata_t),
+    bool ret = thorough_write(mt, data, count,
                              MIMPI_WRITE_OFFSET + MIMPI_MAX_N * rank + destination,
                              destination);
 
-    free(buf);
     if (!ret) { return MIMPI_ERROR_REMOTE_FINISHED; }
     else { return MIMPI_SUCCESS; }
 }
@@ -511,9 +535,8 @@ MIMPI_Retcode MIMPI_Recv(
                     }
             }
         }
-        // Unreachable code, but there is a return to avoid warnings.
+        // Unreachable code.
         assert(false);
-        return MIMPI_ERROR_REMOTE_FINISHED;
     } else {
         ASSERT_SYS_OK(pthread_mutex_unlock(&g_mutex));
         return MIMPI_SUCCESS;
