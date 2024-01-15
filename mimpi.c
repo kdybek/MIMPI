@@ -238,8 +238,8 @@ static void send_waiting(int dest, int recv, int sent) {
     if (g_deadlock_detection) {
         metadata_t mt;
         mt.signal = WAITING;
-        mt.tag = 0;
-        mt.count = 0;
+        mt.tag = 0; // Initializing the data to avoid valgrind errors.
+        mt.count = 0; // Initializing the data to avoid valgrind errors.
         mt.num_recv = recv;
         mt.num_sent = sent;
 
@@ -438,8 +438,8 @@ MIMPI_Retcode MIMPI_Send(
     mt.signal = SEND;
     mt.tag = tag;
     mt.count = count;
-    mt.num_recv = 0;
-    mt.num_sent = 0;
+    mt.num_recv = 0; // Initializing the data to avoid valgrind errors.
+    mt.num_sent = 0; // Initializing the data to avoid valgrind errors.
 
     ASSERT_SYS_OK(pthread_mutex_lock(&g_mutex));
 
@@ -557,6 +557,7 @@ MIMPI_Retcode MIMPI_Barrier() {
     // If rank is the root of the tree, there will be garbage in p, but it won't be used.
     int p = parent(rank);
     char* dummy = malloc(sizeof(char));
+    *dummy = '0'; // Initializing the data to avoid valgrind errors.
 
     if (has_left_child(rank)) {
         ret = MIMPI_Recv(dummy, sizeof(char), l, -1);
@@ -602,6 +603,7 @@ MIMPI_Retcode MIMPI_Bcast(
     // If rank is the root of the tree, there will be garbage in p, but it won't be used.
     int p = rank_adjust(parent(rank), root);
     char* dummy = malloc(sizeof(char));
+    *dummy = '0'; // Initializing the data to avoid valgrind errors.
 
     if (has_left_child(rank)) {
         ret = MIMPI_Recv(dummy, sizeof(char), l, -1);
@@ -649,6 +651,7 @@ MIMPI_Retcode MIMPI_Reduce(
     // If rank is the root of the tree, there will be garbage in p, but it won't be used.
     int p = rank_adjust(parent(rank), root);
     char* dummy = malloc(sizeof(char));
+    *dummy = '0'; // Initializing the data to avoid valgrind errors.
     u_int8_t* res = malloc(count);
     u_int8_t* buf = malloc(count);
     memcpy(res, send_data, count);
